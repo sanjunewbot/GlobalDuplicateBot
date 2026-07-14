@@ -126,7 +126,8 @@ class Database:
                 chat_id  INTEGER PRIMARY KEY,
                 title    TEXT NOT NULL DEFAULT '',
                 added_at TEXT NOT NULL DEFAULT (datetime('now')),
-                status   TEXT NOT NULL DEFAULT 'pending'
+                status   TEXT NOT NULL DEFAULT 'pending',
+                add_seq  INTEGER
             );
             """
         )
@@ -293,8 +294,8 @@ class Database:
         """Returns True if newly added, False if it already existed."""
         conn = self._require_conn()
         cursor = await conn.execute(
-            "INSERT OR IGNORE INTO channels (chat_id, title, status) "
-            "VALUES (?, ?, 'pending');",
+            "INSERT OR IGNORE INTO channels (chat_id, title, status, add_seq) "
+            "VALUES (?, ?, 'pending', (SELECT COALESCE(MAX(add_seq), 0) + 1 FROM channels));",
             (chat_id, title),
         )
         await conn.commit()
@@ -311,7 +312,7 @@ class Database:
         conn = self._require_conn()
         results: list[ChannelRecord] = []
         async with conn.execute(
-            "SELECT chat_id, title, status FROM channels ORDER BY added_at ASC;"
+            "SELECT chat_id, title, status FROM channels ORDER BY add_seq ASC;"
         ) as cursor:
             async for row in cursor:
                 results.append(ChannelRecord(chat_id=row["chat_id"], title=row["title"], status=row["status"]))
