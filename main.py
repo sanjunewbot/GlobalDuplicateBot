@@ -1,23 +1,3 @@
-"""
-GlobalDuplicateBot - main.py
-
-Entry point for the Telegram Global Duplicate Scanner Bot.
-
-Responsibilities of this file:
-    - Application bootstrap (config, logging, database, pyrogram client)
-    - Graceful startup / shutdown with signal handling (SIGINT, SIGTERM)
-    - Queue manager + worker manager wiring
-    - Command handler registration
-    - Global error handling / crash recovery
-    - Automatic restart support (supervisor loop)
-
-This file intentionally contains NO scanning/hashing/database logic itself.
-Those live in scanner.py, hasher.py and database.py respectively, and are
-imported and wired together here. This keeps main.py as a composition root
-following dependency-injection principles: concrete objects are constructed
-once, here, and handed down into the classes that need them.
-"""
-
 from __future__ import annotations
 
 import asyncio
