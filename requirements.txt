@@ -1,0 +1,5 @@
+pyrogram>=2.0.106
+tgcrypto>=1.2.5
+aiosqlite>=0.20.0
+blake3>=0.4.1
+
