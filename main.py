@@ -76,10 +76,14 @@ class GlobalDuplicateBotApp:
         )
         logger.info("Configuration loaded. Building application...")
 
-        db = Database(db_path=config.database_path, logger=logger)
+        db = Database(
+            mongodb_uri=config.mongodb_uri,
+            db_name=config.mongodb_db_name,
+            logger=logger,
+        )
         await db.connect()
         await db.init_schema()
-        logger.info("Database connected and schema ensured (WAL mode).")
+        logger.info("Database connected and schema ensured.")
 
         client = Client(
             name=config.session_name,
@@ -135,7 +139,7 @@ class GlobalDuplicateBotApp:
             )
         )
 
-        # Periodic housekeeping: batched commits, stats flush, WAL checkpoint.
+        # Periodic housekeeping: batched commits, stats flush.
         self._background_tasks.append(
             asyncio.create_task(
                 self._periodic_maintenance(state),
@@ -150,6 +154,18 @@ class GlobalDuplicateBotApp:
                 name="scan_worker_loop",
             )
         )
+
+        # Trivial HTTP endpoint for external uptime pingers (e.g. UptimeRobot)
+        # on hosts that sleep an inactive process. Purely a keep-alive
+        # surface; safe to disable via HEALTH_CHECK_ENABLED=false on hosts
+        # that don't need it (or that reject apps listening on a port).
+        if state.config.health_check_enabled:
+            self._background_tasks.append(
+                asyncio.create_task(
+                    _run_health_check_server(state.config, state.logger),
+                    name="health_check_server",
+                )
+            )
 
         state.logger.info("GlobalDuplicateBot started successfully.")
 
@@ -200,8 +216,8 @@ class GlobalDuplicateBotApp:
 
     async def _periodic_maintenance(self, state: AppState) -> None:
         """
-        Background loop: flushes stats, checkpoints the WAL file
-        periodically so it doesn't grow unbounded, and logs a heartbeat.
+        Background loop: flushes stats periodically (checkpoint_wal() is a
+        no-op under the MongoDB backend, kept only for interface parity)
         Runs until shutdown is signaled.
         """
         interval = state.config.maintenance_interval_seconds
@@ -215,7 +231,7 @@ class GlobalDuplicateBotApp:
             try:
                 await state.db.checkpoint_wal()
                 await state.db.flush_stats()
-                state.logger.debug("Periodic maintenance: WAL checkpoint + stats flush OK.")
+                state.logger.debug("Periodic maintenance: stats flush OK.")
             except Exception:
                 state.logger.error(
                     "Periodic maintenance failed:\n%s", traceback.format_exc()
@@ -232,7 +248,7 @@ class GlobalDuplicateBotApp:
     async def shutdown(self) -> None:
         """
         Gracefully stop everything: signal background tasks to stop,
-        wait for them, flush the database, checkpoint WAL, stop the
+        wait for them, flush the database, stop the
         pyrogram client. Safe to call multiple times.
         """
         if self._shutting_down:
@@ -341,6 +357,62 @@ def install_global_exception_handler(app: GlobalDuplicateBotApp, loop: asyncio.A
     loop.set_exception_handler(_exception_handler)
 
 
+async def _handle_health_check_connection(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """
+    Handle one HTTP connection with the smallest possible valid response.
+    Reads (and discards) the request, then always replies 200 OK. This
+    exists purely so an external uptime pinger (e.g. UptimeRobot) has
+    something to hit periodically to keep the process from being put to
+    sleep on hosts that suspend inactive processes (e.g. Replit's free
+    tier). It has no bearing on the bot's actual functionality.
+    """
+    try:
+        try:
+            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError):
+            pass  # malformed/partial request is fine; still respond 200 below
+
+        body = b"OK"
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+            b"Connection: close\r\n"
+            b"\r\n" + body
+        )
+        writer.write(response)
+        await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+
+
+async def _run_health_check_server(config: Config, logger: logging.Logger) -> None:
+    """
+    Serves a trivial 200-OK HTTP response on config.health_check_port
+    forever. Started as a background task; cancelled at shutdown along
+    with the other background tasks. No effect on scanning/hashing/
+    deletion logic — this is purely a keep-alive/health-check surface
+    for whichever host is running the process.
+    """
+    server = await asyncio.start_server(
+        _handle_health_check_connection, host="0.0.0.0", port=config.health_check_port
+    )
+    logger.info(
+        "Keep-alive HTTP endpoint listening on 0.0.0.0:%s (for uptime pingers).",
+        config.health_check_port,
+    )
+    async with server:
+        await server.serve_forever()
+
+
 # --------------------------------------------------------------------------- #
 # Supervisor: process-level auto-restart
 # --------------------------------------------------------------------------- #
@@ -421,3 +493,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
