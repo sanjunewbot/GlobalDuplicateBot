@@ -82,8 +82,11 @@ class Config:
 
     # --- Filesystem locations ---
     workdir: str
-    database_path: str
     log_dir: str
+
+    # --- Database (MongoDB Atlas or any MongoDB instance) ---
+    mongodb_uri: str
+    mongodb_db_name: str
 
     # --- Admin / access control ---
     admin_user_ids: tuple[int, ...]
@@ -98,6 +101,11 @@ class Config:
     scan_concurrency: int
     flood_sleep_threshold: int
     max_flood_wait_retries: int
+
+    # --- Keep-alive HTTP endpoint (for uptime pingers on hosts like Replit
+    # that sleep the process after inactivity; harmless no-op elsewhere) ---
+    health_check_port: int
+    health_check_enabled: bool
 
     # --- Background maintenance ---
     maintenance_interval_seconds: int
@@ -128,12 +136,13 @@ class Config:
         session_name = _optional("SESSION_NAME", default="global_duplicate_bot")
 
         workdir = _optional("WORKDIR", default=str(project_root / "session"))
-        database_path = _optional("DATABASE_PATH", default=str(project_root / "data" / "media_hashes.db"))
         log_dir = _optional("LOG_DIR", default=str(project_root / "logs"))
 
         Path(workdir).mkdir(parents=True, exist_ok=True)
-        Path(database_path).parent.mkdir(parents=True, exist_ok=True)
         Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+        mongodb_uri = _require("MONGODB_URI")
+        mongodb_db_name = _optional("MONGODB_DB_NAME", default="global_duplicate_bot")
 
         admin_ids_raw = _optional("ADMIN_USER_IDS", default="")
         admin_user_ids = tuple(
@@ -159,6 +168,13 @@ class Config:
         max_flood_wait_retries = _optional_int("MAX_FLOOD_WAIT_RETRIES", default=10)
         maintenance_interval_seconds = _optional_int("MAINTENANCE_INTERVAL_SECONDS", default=60)
 
+        # Replit (and several other free hosts) inject PORT automatically;
+        # prefer that if present so no extra config is needed there, but
+        # allow HEALTH_CHECK_PORT to override explicitly.
+        default_port = _optional_int("PORT", default=8080)
+        health_check_port = _optional_int("HEALTH_CHECK_PORT", default=default_port)
+        health_check_enabled = _optional_bool("HEALTH_CHECK_ENABLED", default=True)
+
         if scan_concurrency < 1:
             raise ConfigError("SCAN_CONCURRENCY must be >= 1.")
         if hash_chunk_size < 4096:
@@ -170,7 +186,8 @@ class Config:
             bot_token=bot_token,
             session_name=session_name,
             workdir=workdir,
-            database_path=database_path,
+            mongodb_uri=mongodb_uri,
+            mongodb_db_name=mongodb_db_name,
             log_dir=log_dir,
             admin_user_ids=admin_user_ids,
             log_level=log_level,
@@ -181,6 +198,8 @@ class Config:
             flood_sleep_threshold=flood_sleep_threshold,
             max_flood_wait_retries=max_flood_wait_retries,
             maintenance_interval_seconds=maintenance_interval_seconds,
+            health_check_port=health_check_port,
+            health_check_enabled=health_check_enabled,
         )
 
     def is_admin(self, user_id: int) -> bool:
@@ -199,7 +218,7 @@ def _self_check() -> None:
         sys.exit(1)
     print("Configuration OK:")
     print(f"  session_name = {cfg.session_name}")
-    print(f"  database_path = {cfg.database_path}")
+    print(f"  mongodb_db_name = {cfg.mongodb_db_name}")
     print(f"  log_dir = {cfg.log_dir}")
     print(f"  admin_user_ids = {cfg.admin_user_ids}")
     print(f"  scan_concurrency = {cfg.scan_concurrency}")
