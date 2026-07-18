@@ -17,6 +17,7 @@ from logger import setup_logging
 from database import Database
 from scanner import ScanQueueManager
 from commands import CommandRegistrar
+from health_server import run_health_server
 
 
 # --------------------------------------------------------------------------- #
@@ -162,7 +163,7 @@ class GlobalDuplicateBotApp:
         if state.config.health_check_enabled:
             self._background_tasks.append(
                 asyncio.create_task(
-                    _run_health_check_server(state.config, state.logger),
+                    run_health_server(state.config.health_check_port, state.logger),
                     name="health_check_server",
                 )
             )
@@ -357,62 +358,6 @@ def install_global_exception_handler(app: GlobalDuplicateBotApp, loop: asyncio.A
     loop.set_exception_handler(_exception_handler)
 
 
-async def _handle_health_check_connection(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> None:
-    """
-    Handle one HTTP connection with the smallest possible valid response.
-    Reads (and discards) the request, then always replies 200 OK. This
-    exists purely so an external uptime pinger (e.g. UptimeRobot) has
-    something to hit periodically to keep the process from being put to
-    sleep on hosts that suspend inactive processes (e.g. Replit's free
-    tier). It has no bearing on the bot's actual functionality.
-    """
-    try:
-        try:
-            await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
-        except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError):
-            pass  # malformed/partial request is fine; still respond 200 below
-
-        body = b"OK"
-        response = (
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain\r\n"
-            b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
-            b"Connection: close\r\n"
-            b"\r\n" + body
-        )
-        writer.write(response)
-        await writer.drain()
-    except (ConnectionError, OSError):
-        pass
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except (ConnectionError, OSError):
-            pass
-
-
-async def _run_health_check_server(config: Config, logger: logging.Logger) -> None:
-    """
-    Serves a trivial 200-OK HTTP response on config.health_check_port
-    forever. Started as a background task; cancelled at shutdown along
-    with the other background tasks. No effect on scanning/hashing/
-    deletion logic — this is purely a keep-alive/health-check surface
-    for whichever host is running the process.
-    """
-    server = await asyncio.start_server(
-        _handle_health_check_connection, host="0.0.0.0", port=config.health_check_port
-    )
-    logger.info(
-        "Keep-alive HTTP endpoint listening on 0.0.0.0:%s (for uptime pingers).",
-        config.health_check_port,
-    )
-    async with server:
-        await server.serve_forever()
-
-
 # --------------------------------------------------------------------------- #
 # Supervisor: process-level auto-restart
 # --------------------------------------------------------------------------- #
@@ -493,4 +438,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
