@@ -205,15 +205,28 @@ class ChannelScanner:
                 # Resume the history iterator from the same offset_id;
                 # nothing has been marked processed yet for messages not
                 # yet yielded, so no gap or duplicate work is introduced.
-            except RPCError:
+            except RPCError as e:
                 attempts += 1
                 if attempts > self._config.max_flood_wait_retries:
                     raise
                 backoff = min(2 ** attempts, 60)
                 self._logger.warning(
-                    "RPC error iterating history of channel %s, retrying in %ss "
-                    "(attempt %s/%s).",
-                    chat_id, backoff, attempts, self._config.max_flood_wait_retries,
+                    "RPC error iterating history of channel %s: %s (%s). "
+                    "Retrying in %ss (attempt %s/%s).",
+                    chat_id, type(e).__name__, e, backoff,
+                    attempts, self._config.max_flood_wait_retries,
+                )
+                await asyncio.sleep(backoff)
+            except Exception as e:
+                attempts += 1
+                if attempts > self._config.max_flood_wait_retries:
+                    raise
+                backoff = min(2 ** attempts, 60)
+                self._logger.warning(
+                    "Unexpected error iterating history of channel %s: %s (%s). "
+                    "Retrying in %ss (attempt %s/%s).",
+                    chat_id, type(e).__name__, e, backoff,
+                    attempts, self._config.max_flood_wait_retries,
                 )
                 await asyncio.sleep(backoff)
 
