@@ -398,7 +398,7 @@ class ScanQueueManager:
         again.
         """
         channels = await self._db.list_channels()
-        pending = [c for c in channels if c.status in ("scanning", "pending")]
+        pending = [c for c in channels if c.status in ("scanning", "pending", "error")]
         if not pending:
             return
 
