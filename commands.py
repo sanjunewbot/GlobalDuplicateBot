@@ -96,7 +96,7 @@ class CommandRegistrar:
     # /addchannel
     # ------------------------------------------------------------------ #
 
-    async def handle_addchannel(self, message: Message) -> None:
+    async def handle_addchannel(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
 
@@ -128,7 +128,7 @@ class CommandRegistrar:
     # /removechannel
     # ------------------------------------------------------------------ #
 
-    async def handle_removechannel(self, message: Message) -> None:
+    async def handle_removechannel(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
 
@@ -150,7 +150,7 @@ class CommandRegistrar:
     # /listchannels
     # ------------------------------------------------------------------ #
 
-    async def handle_listchannels(self, message: Message) -> None:
+    async def handle_listchannels(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
 
@@ -168,7 +168,7 @@ class CommandRegistrar:
     # /startscan
     # ------------------------------------------------------------------ #
 
-    async def handle_startscan(self, message: Message) -> None:
+    async def handle_startscan(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
 
@@ -187,7 +187,7 @@ class CommandRegistrar:
     # /pause, /resume
     # ------------------------------------------------------------------ #
 
-    async def handle_pause(self, message: Message) -> None:
+    async def handle_pause(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
         self._queue_manager.pause()
@@ -196,7 +196,7 @@ class CommandRegistrar:
             "Use /resume to continue."
         )
 
-    async def handle_resume(self, message: Message) -> None:
+    async def handle_resume(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
         self._queue_manager.resume()
@@ -206,13 +206,13 @@ class CommandRegistrar:
     # /status, /stats
     # ------------------------------------------------------------------ #
 
-    async def handle_status(self, message: Message) -> None:
+    async def handle_status(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
         status = await self._queue_manager.get_status()
         await message.reply_text(build_status_message(status))
 
-    async def handle_stats(self, message: Message) -> None:
+    async def handle_stats(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
         stats = self._queue_manager.get_stats()
@@ -224,7 +224,7 @@ class CommandRegistrar:
     # /resetdb (destructive — requires explicit confirmation argument)
     # ------------------------------------------------------------------ #
 
-    async def handle_resetdb(self, message: Message) -> None:
+    async def handle_resetdb(self, client: Client, message: Message) -> None:
         if await self._reject_if_not_admin(message):
             return
 
