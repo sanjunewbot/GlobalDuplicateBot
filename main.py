@@ -12,6 +12,23 @@ from typing import Optional
 from pyrogram import Client
 from pyrogram.errors import RPCError, FloodWait
 
+# --------------------------------------------------------------------------- #
+# Pyrogram compatibility patch
+# --------------------------------------------------------------------------- #
+# Pyrogram's current stable release ships with outdated MIN_CHANNEL_ID /
+# MIN_CHAT_ID boundary constants that predate Telegram's newer, larger
+# channel-id numbering space. This causes a false "Peer id invalid" error
+# for channels Telegram has legitimately assigned a lower (more negative)
+# numeric id to, even though the id itself is valid and the account is a
+# genuine member. This is a known upstream issue (pyrogram/pyrogram PR
+# #1430 and #1435) that has not yet been merged into a released version,
+# so the fix is applied directly here rather than waiting on a new release.
+# Widened well beyond both proposed PR values to leave headroom for further
+# growth of Telegram's id space.
+import pyrogram.utils as _pyrogram_utils
+_pyrogram_utils.MIN_CHANNEL_ID = -2000000000000
+_pyrogram_utils.MIN_CHAT_ID = -999999999999
+
 from config import Config
 from logger import setup_logging
 from database import Database
