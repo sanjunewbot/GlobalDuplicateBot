@@ -115,12 +115,26 @@ class Database:
         """
         for pending in reversed(self._pending_hash_inserts):
             if pending.hash == file_hash:
+                self._logger.info(
+                    "[DB LOOKUP] hash=%s matched an UNFLUSHED in-memory record "
+                    "(chat=%s message=%s) — not yet written to MongoDB.",
+                    file_hash, pending.chat_id, pending.message_id,
+                )
                 return pending
 
         db = self._require_db()
         doc = await db.media_hashes.find_one({"_id": file_hash})
         if doc is None:
+            self._logger.info(
+                "[DB LOOKUP] hash=%s: no match in MongoDB media_hashes collection.",
+                file_hash,
+            )
             return None
+        self._logger.info(
+            "[DB LOOKUP] hash=%s matched an existing MongoDB record "
+            "(chat=%s message=%s, stored file_size=%s).",
+            file_hash, doc["chat_id"], doc["message_id"], doc["file_size"],
+        )
         return MediaHashRecord(
             hash=doc["_id"],
             chat_id=doc["chat_id"],
