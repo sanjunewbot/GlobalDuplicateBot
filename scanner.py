@@ -113,25 +113,49 @@ class ChannelScanner:
 
     async def scan(self, chat_id: int, title: str) -> bool:
         """
-        Scan `chat_id` from its last checkpoint to the beginning of its
-        history. Returns True if the channel was fully completed
-        (reached the beginning), False if scanning was interrupted by
-        a pause or stop request (in which case it should be resumed
-        later, not marked completed).
+        Scan `chat_id` from its last checkpoint down to message id 1.
+        Returns True if the channel was fully completed (reached id 1),
+        False if scanning was interrupted by a pause or stop request (in
+        which case it should be resumed later, not marked completed).
+
+        Unlike a user session, a bot account cannot call get_chat_history()
+        (Telegram rejects it with BOT_METHOD_INVALID — bots have no
+        "browse history" permission at all). What bots CAN do is fetch
+        specific messages by id via get_messages(), and send/delete
+        messages. So instead of an incremental history iterator, this
+        walks backward through explicit message-id batches starting from
+        the channel's current highest id (discovered via a short-lived
+        probe message on first scan of a channel) down to 1, skipping
+        ids that come back empty (deleted/never-existed messages).
         """
         self.channel_scanned = 0
         self.channel_duplicates = 0
 
-        offset_id = await self._db.get_progress(chat_id)
-        self._logger.info(
-            "Starting scan of channel %s (%s) from offset_id=%s.",
-            chat_id, title, offset_id,
-        )
+        progress = await self._db.get_progress(chat_id)
+        if progress == 0:
+            # First scan of this channel: discover the current highest
+            # message id by sending a short-lived probe message and
+            # reading back its id, then deleting it immediately.
+            highest_id = await self._discover_highest_message_id(chat_id)
+            start_id = highest_id
+            self._logger.info(
+                "Starting scan of channel %s (%s): discovered highest "
+                "message id=%s, will walk backward to id=1.",
+                chat_id, title, highest_id,
+            )
+        else:
+            # Resuming: progress stores the last id we successfully
+            # checked, so continue from just below it.
+            start_id = progress - 1
+            self._logger.info(
+                "Resuming scan of channel %s (%s) from id=%s (down to 1).",
+                chat_id, title, start_id,
+            )
 
         await self._db.set_channel_status(chat_id, "scanning")
 
         try:
-            async for message in self._iter_history_with_retry(chat_id, offset_id):
+            async for message in self._iter_by_id_range_with_retry(chat_id, start_id):
                 if self._stop_event.is_set():
                     self._logger.info(
                         "Stop requested; suspending scan of channel %s at message %s.",
@@ -150,15 +174,14 @@ class ChannelScanner:
 
                 await self._process_message(chat_id, message)
 
-                # Progress is the oldest message id processed so far;
-                # since history is walked newest -> oldest, that's simply
-                # the id of the message we just handled.
+                # Progress is the lowest message id checked so far (we
+                # walk newest -> oldest), so it's the id we just handled.
                 self._db.queue_progress_update(chat_id, message.id)
                 await self._db.maybe_flush_on_interval()
 
-            # Iterator exhausted with no stop/pause interruption: the
-            # entire channel history, back to its very first message,
-            # has now been scanned.
+            # Reached id 1 with no stop/pause interruption: the entire
+            # channel, from its highest id at scan-start down to its
+            # very first message, has now been scanned.
             await self._db.flush_pending_hashes(force=True)
             await self._db.set_channel_status(chat_id, "completed")
             self._logger.info(
@@ -176,59 +199,126 @@ class ChannelScanner:
             )
             raise
 
-    async def _iter_history_with_retry(self, chat_id: int, offset_id: int):
+    async def _discover_highest_message_id(self, chat_id: int) -> int:
         """
-        Wraps `client.get_chat_history()` with FloodWait retry. This is
-        the ONLY history-iteration mechanism used — never
-        `get_messages(message_id)` in a loop, and never guessing at
-        message ids that may not exist.
+        Bot accounts have no way to ask Telegram "what is the highest
+        message id in this channel" directly, and can't browse history
+        to find out. The reliable workaround: send a short, obviously
+        bot-generated placeholder message, read back its id (message ids
+        are strictly increasing, so this is guaranteed to be >= every
+        existing message), then delete it immediately. The channel is
+        visible with this placeholder for well under a second.
         """
         attempts = 0
         while True:
             try:
-                async for message in self._client.get_chat_history(
-                    chat_id, offset_id=offset_id
-                ):
-                    attempts = 0  # reset backoff after any successful yield
-                    yield message
-                return
+                probe = await self._client.send_message(
+                    chat_id, "🔄 GlobalDuplicateBot: syncing…"
+                )
+                try:
+                    await self._client.delete_messages(chat_id, message_ids=[probe.id])
+                except Exception:
+                    self._logger.warning(
+                        "Could not delete probe message %s in chat %s; it may "
+                        "remain visible.", probe.id, chat_id,
+                    )
+                return probe.id
             except FloodWait as e:
                 attempts += 1
                 if attempts > self._config.max_flood_wait_retries:
                     raise
                 self._logger.warning(
-                    "FloodWait iterating history of channel %s: sleeping %ss "
-                    "(attempt %s/%s).",
-                    chat_id, e.value, attempts, self._config.max_flood_wait_retries,
+                    "FloodWait sending probe message to channel %s: sleeping %ss.",
+                    chat_id, e.value,
                 )
                 await asyncio.sleep(e.value + 1)
-                # Resume the history iterator from the same offset_id;
-                # nothing has been marked processed yet for messages not
-                # yet yielded, so no gap or duplicate work is introduced.
             except RPCError as e:
                 attempts += 1
                 if attempts > self._config.max_flood_wait_retries:
-                    raise
+                    raise RuntimeError(
+                        f"Could not discover highest message id for channel "
+                        f"{chat_id}: {type(e).__name__}: {e}. The bot needs "
+                        f"'Send Messages' and 'Delete Messages' permissions "
+                        f"in this channel."
+                    ) from e
                 backoff = min(2 ** attempts, 60)
                 self._logger.warning(
-                    "RPC error iterating history of channel %s: %s (%s). "
+                    "RPC error sending probe message to channel %s: %s (%s). "
                     "Retrying in %ss (attempt %s/%s).",
                     chat_id, type(e).__name__, e, backoff,
                     attempts, self._config.max_flood_wait_retries,
                 )
                 await asyncio.sleep(backoff)
-            except Exception as e:
-                attempts += 1
-                if attempts > self._config.max_flood_wait_retries:
-                    raise
-                backoff = min(2 ** attempts, 60)
-                self._logger.warning(
-                    "Unexpected error iterating history of channel %s: %s (%s). "
-                    "Retrying in %ss (attempt %s/%s).",
-                    chat_id, type(e).__name__, e, backoff,
-                    attempts, self._config.max_flood_wait_retries,
-                )
-                await asyncio.sleep(backoff)
+
+    async def _iter_by_id_range_with_retry(self, chat_id: int, start_id: int):
+        """
+        Walks message ids backward from `start_id` down to 1 in batches,
+        fetching each batch via `client.get_messages(chat_id, ids)`. This
+        is the bot-account-compatible replacement for get_chat_history()
+        (which Telegram rejects for bot accounts with BOT_METHOD_INVALID
+        — bots have no history-browsing permission at all, only the
+        ability to fetch specific known message ids). Ids that come back
+        empty (deleted, or never existed) are silently skipped, exactly
+        as a real gap in a channel's message sequence should be handled.
+        """
+        batch_size = 200  # Telegram's practical batch limit for get_messages
+        current_id = start_id
+
+        while current_id >= 1:
+            batch_ids = list(range(current_id, max(current_id - batch_size, 0), -1))
+            attempts = 0
+            while True:
+                try:
+                    messages = await self._client.get_messages(chat_id, batch_ids)
+                    if not isinstance(messages, list):
+                        messages = [messages]
+                    break
+                except FloodWait as e:
+                    attempts += 1
+                    if attempts > self._config.max_flood_wait_retries:
+                        raise
+                    self._logger.warning(
+                        "FloodWait fetching id batch (%s..%s) in channel %s: "
+                        "sleeping %ss (attempt %s/%s).",
+                        batch_ids[0], batch_ids[-1], chat_id, e.value,
+                        attempts, self._config.max_flood_wait_retries,
+                    )
+                    await asyncio.sleep(e.value + 1)
+                except RPCError as e:
+                    attempts += 1
+                    if attempts > self._config.max_flood_wait_retries:
+                        raise
+                    backoff = min(2 ** attempts, 60)
+                    self._logger.warning(
+                        "RPC error fetching id batch (%s..%s) in channel %s: "
+                        "%s (%s). Retrying in %ss (attempt %s/%s).",
+                        batch_ids[0], batch_ids[-1], chat_id,
+                        type(e).__name__, e, backoff,
+                        attempts, self._config.max_flood_wait_retries,
+                    )
+                    await asyncio.sleep(backoff)
+                except Exception as e:
+                    attempts += 1
+                    if attempts > self._config.max_flood_wait_retries:
+                        raise
+                    backoff = min(2 ** attempts, 60)
+                    self._logger.warning(
+                        "Unexpected error fetching id batch (%s..%s) in "
+                        "channel %s: %s (%s). Retrying in %ss (attempt %s/%s).",
+                        batch_ids[0], batch_ids[-1], chat_id,
+                        type(e).__name__, e, backoff,
+                        attempts, self._config.max_flood_wait_retries,
+                    )
+                    await asyncio.sleep(backoff)
+
+            # Yield in strictly descending id order, skipping any id that
+            # doesn't correspond to a real message (deleted or a gap).
+            for message, message_id in zip(messages, batch_ids):
+                if message is None or getattr(message, "empty", False):
+                    continue
+                yield message
+
+            current_id = batch_ids[-1] - 1
 
     async def _process_message(self, chat_id: int, message) -> None:
         if not MediaHasher.has_supported_media(message):
