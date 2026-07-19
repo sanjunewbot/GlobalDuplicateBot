@@ -188,6 +188,7 @@ class GlobalDuplicateBotApp:
                     me.username or me.first_name,
                     me.id,
                 )
+                await self._hydrate_peer_cache(state)
                 return
             except FloodWait as e:
                 state.logger.warning(
@@ -215,7 +216,34 @@ class GlobalDuplicateBotApp:
             f"Failed to start Pyrogram client after {max_attempts} attempts."
         )
 
-    async def _periodic_maintenance(self, state: AppState) -> None:
+    async def _hydrate_peer_cache(self, state: AppState) -> None:
+        """
+        Pyrogram can only resolve a chat by its raw numeric ID once it has
+        the chat's access hash cached in local session storage. That cache
+        is populated either by resolving a chat via @username, or by
+        iterating the account's dialog list. Since this bot is driven by
+        /addchannel <numeric_id> rather than usernames, we proactively
+        walk the full dialog list once at startup so every channel/group
+        the account is already a member of becomes resolvable by ID —
+        otherwise calls like get_chat_history(chat_id) fail with
+        "Peer id invalid" even though the account really is a member.
+        """
+        try:
+            dialog_count = 0
+            async for _ in state.client.get_dialogs():
+                dialog_count += 1
+            state.logger.info(
+                "Peer cache hydrated: synced %s dialog(s) so channels can be "
+                "resolved by numeric id.", dialog_count,
+            )
+        except Exception:
+            state.logger.warning(
+                "Failed to hydrate peer cache via get_dialogs(); channels not "
+                "yet resolvable by username may fail with 'Peer id invalid' "
+                "until this succeeds:\n%s", traceback.format_exc(),
+            )
+
+
         """
         Background loop: flushes stats periodically (checkpoint_wal() is a
         no-op under the MongoDB backend, kept only for interface parity)
