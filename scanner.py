@@ -332,16 +332,35 @@ class ChannelScanner:
             )
             return
 
+        self._logger.info(
+            "[DEDUPE] chat=%s message=%s media_type=%s file_size=%s bytes_hashed=%s "
+            "computed_hash=%s",
+            chat_id, message.id, hash_result.media_type, hash_result.file_size,
+            hash_result.bytes_hashed, hash_result.file_hash,
+        )
+
         self.channel_scanned += 1
         self._db.increment_scanned()
         self._speed_tracker.tick()
 
         existing = await self._db.lookup_hash(hash_result.file_hash)
         if existing is not None:
+            self._logger.info(
+                "[DEDUPE] lookup result: FOUND existing record for hash=%s -> "
+                "original chat=%s message=%s file_size=%s. Decision: DUPLICATE, deleting "
+                "chat=%s message=%s.",
+                hash_result.file_hash, existing.chat_id, existing.message_id,
+                existing.file_size, chat_id, message.id,
+            )
             await self._delete_duplicate(chat_id, message.id, hash_result.file_hash, existing)
             self.channel_duplicates += 1
             self._db.increment_duplicates()
         else:
+            self._logger.info(
+                "[DEDUPE] lookup result: NOT FOUND for hash=%s. Decision: UNIQUE, "
+                "inserting chat=%s message=%s into global media_hashes.",
+                hash_result.file_hash, chat_id, message.id,
+            )
             await self._db.insert_hash(
                 MediaHashRecord(
                     hash=hash_result.file_hash,
