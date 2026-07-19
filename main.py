@@ -236,15 +236,23 @@ class GlobalDuplicateBotApp:
     async def _hydrate_peer_cache(self, state: AppState) -> None:
         """
         Pyrogram can only resolve a chat by its raw numeric ID once it has
-        the chat's access hash cached in local session storage. That cache
-        is populated either by resolving a chat via @username, or by
-        iterating the account's dialog list. Since this bot is driven by
-        /addchannel <numeric_id> rather than usernames, we proactively
-        walk the full dialog list once at startup so every channel/group
-        the account is already a member of becomes resolvable by ID —
-        otherwise calls like get_chat_history(chat_id) fail with
-        "Peer id invalid" even though the account really is a member.
+        the chat's access hash cached in local session storage. For a
+        *user* session, that cache can be populated by walking the full
+        dialog list once at startup. For a *bot* account, Telegram
+        rejects this method outright (BOT_METHOD_INVALID) — bots simply
+        don't have a dialog list to enumerate — so this is skipped
+        entirely when running with BOT_TOKEN set. Bot-mode numeric-id
+        resolution instead relies on the MIN_CHANNEL_ID/MIN_CHAT_ID patch
+        applied at the top of this file, which is the actual fix for the
+        "Peer id invalid" error seen on newer, larger channel ids.
         """
+        if state.config.bot_token:
+            state.logger.debug(
+                "Skipping get_dialogs() peer-cache hydration: not supported "
+                "for bot accounts (BOT_METHOD_INVALID)."
+            )
+            return
+
         try:
             dialog_count = 0
             async for _ in state.client.get_dialogs():
@@ -259,6 +267,29 @@ class GlobalDuplicateBotApp:
                 "yet resolvable by username may fail with 'Peer id invalid' "
                 "until this succeeds:\n%s", traceback.format_exc(),
             )
+
+    async def _periodic_maintenance(self, state: AppState) -> None:
+        """
+        Background loop: flushes stats periodically (checkpoint_wal() is a
+        no-op under the MongoDB backend, kept only for interface parity)
+        Runs until shutdown is signaled.
+        """
+        interval = state.config.maintenance_interval_seconds
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+                break  # shutdown was signaled
+            except asyncio.TimeoutError:
+                pass  # normal tick, continue with maintenance
+
+            try:
+                await state.db.checkpoint_wal()
+                await state.db.flush_stats()
+                state.logger.debug("Periodic maintenance: stats flush OK.")
+            except Exception:
+                state.logger.error(
+                    "Periodic maintenance failed:\n%s", traceback.format_exc()
+                )
 
 
         """
